@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#14111f">
+<title>Mood Music</title>
+<style>
+  :root { --bg:#14111f; --card:#201b33; --text:#f2f0fa; --muted:#a29cc0; --accent:#7c5cff; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body { margin:0; background:var(--bg); color:var(--text);
+         font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+         padding: max(16px, env(safe-area-inset-top)) 16px 32px; max-width: 520px; margin-inline:auto; }
+  h1 { font-size: 1.35rem; margin: 4px 0 2px; }
+  p.sub { margin: 0 0 14px; color: var(--muted); font-size: .9rem; }
+  .cam { position: relative; background:#000; border-radius: 16px; overflow:hidden; aspect-ratio: 3/4; }
+  video { width:100%; height:100%; object-fit: cover; transform: scaleX(-1); }
+  .badge { position:absolute; left:10px; right:10px; bottom:10px; background:rgba(20,17,31,.78);
+           backdrop-filter: blur(6px); border-radius: 12px; padding: 10px 12px; text-align:center; }
+  .badge .big { font-size: 1.5rem; }
+  .badge .small { font-size: .85rem; color: var(--muted); }
+  button.main { width:100%; margin-top:12px; padding:14px; font-size:1.05rem; font-weight:600;
+                border:0; border-radius:12px; background:var(--accent); color:#fff; }
+  button.main.stop { background:#3a3350; }
+  button.main:disabled { opacity:.6; }
+  .card { background:var(--card); border-radius:14px; padding:12px 14px; margin-top:14px; }
+  .card h2 { font-size:1rem; margin:0 0 6px; }
+  .row { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:8px 0;
+         border-top:1px solid rgba(255,255,255,.06); font-size:.92rem; }
+  .row:first-of-type { border-top:0; }
+  .row .count { color:var(--muted); font-size:.8rem; }
+  label.pick { background:#2e2750; padding:7px 12px; border-radius:10px; font-size:.85rem; white-space:nowrap; }
+  input[type=file] { display:none; }
+  #status { margin-top:10px; font-size:.85rem; color:var(--muted); min-height:1.2em; text-align:center; }
+  .now { font-size:.9rem; margin-top:6px; text-align:center; }
+</style>
+</head>
+<body>
+  <h1>🎵 Mood Music</h1>
+  <p class="sub">Your face sets the mood. The music follows.</p>
+
+  <div class="cam">
+    <video id="video" playsinline muted autoplay></video>
+    <div class="badge">
+      <div class="big" id="moodBig">😐 Ready</div>
+      <div class="small" id="moodSmall">Tap Start to open the camera</div>
+    </div>
+  </div>
+
+  <button class="main" id="startBtn">Start</button>
+  <div id="status"></div>
+  <div class="now" id="now"></div>
+
+  <div class="card">
+    <h2>Your songs</h2>
+    <div style="color:var(--muted);font-size:.8rem;margin-bottom:4px">
+      Pick songs from your phone for each mood. They stay on your device. With none picked, a short demo tune plays.
+    </div>
+    <div id="pickers"></div>
+  </div>
+
+<audio id="audio" playsinline></audio>
+
+<script src="https://cdn.jsdelivr.net/npm/@vladmandic/face-api/dist/face-api.js"></script>
+<script>
+const MODEL_URL = "https://cdn.jsdelivr.net/npm/@vladmandic/face-api/model/";
+
+const MOODS = {
+  happy:    { emoji: "😊", label: "Happy",     desc: "Energetic music" },
+  sad:      { emoji: "😢", label: "Sad",       desc: "Relaxing / soothing music" },
+  angry:    { emoji: "😠", label: "Angry",     desc: "Calm instrumental music" },
+  surprise: { emoji: "😲", label: "Surprised", desc: "Exciting music" },
+  neutral:  { emoji: "😐", label: "Neutral",   desc: "Soft background music" }
+};
+// face-api expression name -> our mood folder
+const MAP = { happy:"happy", sad:"sad", angry:"angry", surprised:"surprise",
+              neutral:"neutral", fearful:"sad", disgusted:"angry" };
+
+const DEMO = {
+  happy:    [[523,659,784,659,880,784,659,523], 0.18],
+  sad:      [[440,392,349,330,349,392,330,294], 0.70],
+  angry:    [[220,220,262,220,247,220,196,220], 0.35],
+  surprise: [[392,784,523,988,659,1047,784,1175], 0.15],
+  neutral:  [[262,330,392,330,262,330,392,330], 0.50]
+};
+
+const $ = id => document.getElementById(id);
+const video = $("video"), audio = $("audio");
+const library = { happy:[], sad:[], angry:[], surprise:[], neutral:[] };
+
+// ---- song pickers ----
+for (const [key, m] of Object.entries(MOODS)) {
+  const row = document.createElement("div");
+  row.className = "row";
+  row.innerHTML = `<div>${m.emoji} ${m.label}<div class="count" id="count-${key}">${m.desc} · demo tune</div></div>
+                   <label class="pick">Add songs<input type="file" accept="audio/*" multiple id="file-${key}"></label>`;
+  $("pickers").appendChild(row);
+  row.querySelector("input").addEventListener("change", e => {
+    library[key] = [...e.target.files].map(f => ({ name: f.name, url: URL.createObjectURL(f) }));
+    $("count-" + key).textContent = `${m.desc} · ${library[key].length} song(s)`;
+    if (current === key) playMood(key);
+  });
+}
+
+// ---- audio ----
+let actx = null, demoNodes = [], current = null, lastTrack = null;
+
+function stopDemo() {
+  demoNodes.forEach(n => { try { n.stop(); } catch (e) {} });
+  demoNodes = [];
+}
+function playDemo(mood) {
+  stopDemo();
+  const [notes, dur] = DEMO[mood];
+  let t = actx.currentTime + 0.05;
+  for (let r = 0; r < 8; r++) {
+    for (const f of notes) {
+      const o = actx.createOscillator(), g = actx.createGain();
+      o.frequency.value = f; o.connect(g); g.connect(actx.destination);
+      g.gain.setValueAtTime(0, t);
+      g.gain.linearRampToValueAtTime(0.25, t + 0.02);
+      g.gain.linearRampToValueAtTime(0, t + dur);
+      o.start(t); o.stop(t + dur);
+      demoNodes.push(o); t += dur;
+    }
+  }
+}
+function playMood(mood) {
+  stopDemo(); audio.pause();
+  const tracks = library[mood];
+  if (tracks.length) {
+    const options = tracks.filter(t => t.url !== lastTrack);
+    const pick = (options.length ? options : tracks)[Math.floor(Math.random() * (options.length || tracks.length))];
+    lastTrack = pick.url;
+    audio.src = pick.url;
+    audio.play().catch(err => { $("status").textContent = "Tap the screen to allow sound"; });
+    $("now").textContent = "Now playing: " + pick.name;
+  } else {
+    playDemo(mood);
+    $("now").textContent = "Playing a demo tune (add songs below)";
+  }
+}
+audio.addEventListener("ended", () => { if (current) playMood(current); });
+
+// ---- detection ----
+let running = false, stream = null, timer = null, busy = false;
+const history = [];
+const WINDOW = 6, CONFIRM = 4;
+
+async function detectOnce() {
+  if (busy || video.readyState < 2) return;
+  busy = true;
+  try {
+    const res = await faceapi
+      .detectSingleFace(video, new faceapi.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.4 }))
+      .withFaceExpressions();
+    if (!res) {
+      $("moodSmall").textContent = "No face found. Face the camera in good light";
+      return;
+    }
+    const [name] = Object.entries(res.expressions).sort((a, b) => b[1] - a[1])[0];
+    const mood = MAP[name];
+    history.push(mood);
+    if (history.length > WINDOW) history.shift();
+
+    const counts = {};
+    history.forEach(m => counts[m] = (counts[m] || 0) + 1);
+    const [top, n] = Object.entries(counts).sort((a, b) => b[1] - a[1])[0];
+
+    $("moodBig").textContent = `${MOODS[mood].emoji} ${MOODS[mood].label}`;
+    $("moodSmall").textContent = current ? `${MOODS[current].desc} playing` : "Reading your mood…";
+    if (top !== current && n >= CONFIRM) { current = top; playMood(top); }
+  } catch (e) {
+    $("status").textContent = "Detection error: " + e.message;
+  } finally { busy = false; }
+}
+
+async function start() {
+  const btn = $("startBtn");
+  btn.disabled = true;
+  try {
+    $("status").textContent = "Loading AI model…";
+    actx = actx || new (window.AudioContext || window.webkitAudioContext)();
+    await actx.resume();
+    // unlock <audio> playback inside this tap
+    audio.src = "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAIlYAAESsAAACABAAZGF0YQAAAAA=";
+    audio.play().catch(() => {});
+    await faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL);
+    await faceapi.nets.faceExpressionNet.loadFromUri(MODEL_URL);
+
+    $("status").textContent = "Opening camera…";
+    stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" }, audio: false });
+    video.srcObject = stream;
+    await video.play();
+
+    running = true;
+    btn.textContent = "Stop"; btn.classList.add("stop");
+    $("status").textContent = "";
+    $("moodSmall").textContent = "Reading your mood…";
+    timer = setInterval(detectOnce, 700);
+  } catch (e) {
+    $("status").textContent = "Could not start: " + e.message +
+      " (allow camera access, and open the page over https)";
+  } finally { btn.disabled = false; }
+}
+function stop() {
+  running = false; clearInterval(timer);
+  if (stream) stream.getTracks().forEach(t => t.stop());
+  video.srcObject = null;
+  audio.pause(); stopDemo();
+  current = null; history.length = 0;
+  $("startBtn").textContent = "Start"; $("startBtn").classList.remove("stop");
+  $("moodBig").textContent = "😐 Ready"; $("moodSmall").textContent = "Tap Start to open the camera";
+  $("now").textContent = "";
+}
+$("startBtn").addEventListener("click", () => running ? stop() : start());
+</script>
+</body>
+</html>
